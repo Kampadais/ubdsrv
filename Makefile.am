@@ -13,7 +13,7 @@ AM_CXXFLAGS = -fcoroutines -std=c++20
 
 sbin_PROGRAMS = ublk ublk_user_id
 noinst_PROGRAMS = demo_null demo_event
-dist_sbin_SCRIPTS = utils/ublk_chown.sh
+dist_sbin_SCRIPTS = utils/ublk_chown.sh utils/ublk_chown_docker.sh
 
 ublk_SOURCES = ublksrv_tgt.cpp tgt_null.cpp tgt_loop.cpp qcow2/tgt_qcow2.cpp \
 			   qcow2/qcow2.cpp qcow2/qcow2_meta.cpp qcow2/utils.cpp \
@@ -43,7 +43,7 @@ ublk_user_id_LDADD = lib/libublksrv.la $(LIBURING_LIBS) $(PTHREAD_LIBS)
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = ublksrv.pc
 
-CLEANFILES = *~ test cscope.* include/*~ *.d qcow2/*~ nbd/*~ utils/*~
+CLEANFILES = *~ test cscope.* include/*~ *.d qcow2/*~ nbd/*~ utils/*~ doc/html/*
 
 R = 10
 D = tests/tmp/
@@ -52,6 +52,11 @@ test: $(sbin_PROGRAMS) $(noinst_PROGRAMS)
 
 cscope:
 	@cscope -b -R
+
+if HAVE_DOXYGEN
+doxygen_doc:
+	doxygen doc/Doxyfile
+endif
 
 # Check no files are missing from EXTRA_DIST rules, and that all
 # generated files have been included in the tarball.  (Note you must

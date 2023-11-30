@@ -577,10 +577,10 @@ static int longhorn_handle_recv_reply(const struct ublksrv_queue *q,
         goto fail;
     }
 
-    if (hwq != q->q_id) {
-        longhorn_err("%s %d: hwq is too big %d\n", __func__, __LINE__, hwq);
-        goto fail;
-    }
+//    if (hwq != q->q_id) {
+//        longhorn_err("%s %d: hwq is too big %d\n", __func__, __LINE__, hwq);
+//        goto fail;
+//    }
 
     data = ublksrv_queue_get_io_data(q, tag);
     io = __ublk_get_io_tgt_data(data);
@@ -595,7 +595,7 @@ static int longhorn_handle_recv_reply(const struct ublksrv_queue *q,
         uint32_t type = q_data->reply.type;
 
 
-        longhorn_info("%s: got write reply, tag %d type %u\n", __func__, data->tag, type);
+       // longhorn_info("%s: got write reply, tag %d type %u\n", __func__, data->tag, type);
 
         if (type == LONGHORN_CMD_TYPE_ERROR) {
             fake_cqe.res = -EIO;

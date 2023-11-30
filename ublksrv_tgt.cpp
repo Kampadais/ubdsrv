@@ -20,6 +20,96 @@ struct ublksrv_queue_info {
 static char *full_cmd;
 static struct ublksrv_tgt_type *tgt_list[UBLKSRV_TGT_TYPE_MAX] = {};
 
+int ublk_json_write_dev_info(struct ublksrv_dev *dev, char **jbuf, int *len)
+{
+	int ret = 0;
+
+	do {
+		ret = ublksrv_json_write_dev_info(ublksrv_get_ctrl_dev(dev),
+				*jbuf, *len);
+		if (ret < 0)
+			*jbuf = ublksrv_tgt_realloc_json_buf(dev, len);
+	} while (ret < 0);
+
+	return ret;
+}
+
+int ublk_json_write_params(struct ublksrv_dev *dev, char **jbuf, int *len,
+		const struct ublk_params *p)
+{
+	int ret = 0;
+
+	do {
+		ret = ublksrv_json_write_params(p, *jbuf, *len);
+		if (ret < 0)
+			*jbuf = ublksrv_tgt_realloc_json_buf(dev, len);
+	} while (ret < 0);
+
+	return ret;
+}
+
+int ublk_json_write_target_base(struct ublksrv_dev *dev, char **jbuf, int *len,
+		const struct ublksrv_tgt_base_json *tgt)
+{
+	int ret = 0;
+
+	do {
+		ret = ublksrv_json_write_target_base_info(*jbuf, *len, tgt);
+		if (ret < 0)
+			*jbuf = ublksrv_tgt_realloc_json_buf(dev, len);
+	} while (ret < 0);
+
+	return ret;
+
+}
+
+int ublk_json_write_tgt_str(struct ublksrv_dev *dev, char **jbuf,
+		int *len, const char *name, const char *val)
+{
+	int ret = 0;
+
+	do {
+		if (val)
+			ret = ublksrv_json_write_target_str_info(*jbuf,
+				*len, name, val);
+
+		if (ret < 0)
+			*jbuf = ublksrv_tgt_realloc_json_buf(dev, len);
+	} while (ret < 0);
+
+	return ret;
+}
+
+int ublk_json_write_tgt_ulong(struct ublksrv_dev *dev, char **jbuf,
+		int *len, const char *name, unsigned long val)
+{
+	int ret = 0;
+
+	do {
+		ret = ublksrv_json_write_target_ulong_info(*jbuf,
+				*len, name, val);
+		if (ret < 0)
+			*jbuf = ublksrv_tgt_realloc_json_buf(dev, len);
+	} while (ret < 0);
+
+	return ret;
+}
+
+int ublk_json_write_tgt_long(struct ublksrv_dev *dev, char **jbuf,
+		int *len, const char *name, long val)
+{
+	int ret = 0;
+
+	do {
+		ret = ublksrv_json_write_target_long_info(*jbuf,
+				*len, name, val);
+		if (ret < 0)
+			*jbuf = ublksrv_tgt_realloc_json_buf(dev, len);
+	} while (ret < 0);
+
+	return ret;
+}
+
 static const struct ublksrv_tgt_type *ublksrv_find_tgt_type(const char *name)
 {
 	int i;
@@ -478,27 +568,37 @@ static int ublksrv_stop_io_daemon(const struct ublksrv_ctrl_dev *ctrl_dev)
 	return 0;
 }
 
+/* Wait until ublk device is setup by udev */
+static void ublksrv_check_dev(const struct ublksrv_ctrl_dev_info *info)
+{
+	unsigned int max_time = 1000000, wait = 0;
+	char buf[64];
+
+	snprintf(buf, 64, "%s%d", "/dev/ublkc", info->dev_id);
+
+	while (wait < max_time) {
+		int fd = open(buf, O_RDWR);
+
+		if (fd > 0) {
+			close(fd);
+			break;
+		}
+
+		usleep(100000);
+		wait += 100000;
+	}
+}
+
 static int ublksrv_start_daemon(struct ublksrv_ctrl_dev *ctrl_dev)
 {
+	const struct ublksrv_ctrl_dev_info *dinfo =
+		ublksrv_ctrl_get_dev_info(ctrl_dev);
 	int cnt = 0, daemon_pid, ret;
-	unsigned int max_time = 1000000, wait = 0;
 
-	/*
-	 * Wait until ublk device ownership is setup by udev
-	 */
-	while (wait < max_time) {
-		ret = ublksrv_ctrl_get_affinity(ctrl_dev);
-		if (ret == -EACCES || ret == -EPERM) {
-			usleep(10000);
-			wait += 10000;
-			continue;
-		} else if (ret <= 0)
-			break;
-	}
+	ublksrv_check_dev(dinfo);
+
+	ret = ublksrv_ctrl_get_affinity(ctrl_dev);
 	if (ret < 0) {
-		const struct ublksrv_ctrl_dev_info *dinfo =
-			ublksrv_ctrl_get_dev_info(ctrl_dev);
-
 		fprintf(stderr, "dev %d get affinity failed %d\n",
 				dinfo->dev_id, ret);
 		return -1;
@@ -589,6 +689,7 @@ static int cmd_dev_add(int argc, char *argv[])
 		{ "user_recovery_reissue",	1,	NULL, 'i'},
 		{ "debug_mask",	1,	NULL, 0},
 		{ "unprivileged",	0,	NULL, 0},
+		{ "usercopy",	0,	NULL, 0},
 		{ NULL }
 	};
 	struct ublksrv_dev_data data = {0};
@@ -646,6 +747,8 @@ static int cmd_dev_add(int argc, char *argv[])
 				debug_mask = strtol(optarg, NULL, 16);
 			if (!strcmp(longopts[option_index].name, "unprivileged"))
 				unprivileged = 1;
+			if (!strcmp(longopts[option_index].name, "usercopy"))
+				data.flags |= UBLK_F_USER_COPY;
 			break;
 		}
 	}
@@ -781,12 +884,14 @@ static int __cmd_dev_del(int number, bool log)
 	int ret;
 	struct ublksrv_dev_data data = {
 		.dev_id = number,
+		.run_dir = UBLKSRV_PID_DIR,
 	};
 
 	dev = ublksrv_ctrl_init(&data);
 
 	ret = ublksrv_ctrl_get_info(dev);
 	if (ret < 0) {
+		ret = 0;
 		if (log)
 			fprintf(stderr, "can't get dev info from %d: %d\n", number, ret);
 		goto fail;
@@ -913,6 +1018,54 @@ static void cmd_dev_list_usage(const char *cmd)
 	printf("%s list [-n DEV_ID]\n", cmd);
 }
 
+#define const_ilog2(x) (63 - __builtin_clzll(x))
+
+static int cmd_dev_get_features(int argc, char *argv[])
+{
+	struct ublksrv_dev_data data = {
+		.dev_id = -1,
+		.run_dir = UBLKSRV_PID_DIR,
+	};
+	struct ublksrv_ctrl_dev *dev = ublksrv_ctrl_init(&data);
+	__u64 features = 0;
+	int ret;
+	static const char *feat_map[] = {
+		[const_ilog2(UBLK_F_SUPPORT_ZERO_COPY)] = "ZERO_COPY",
+		[const_ilog2(UBLK_F_URING_CMD_COMP_IN_TASK)] = "COMP_IN_TASK",
+		[const_ilog2(UBLK_F_NEED_GET_DATA)] = "GET_DATA",
+		[const_ilog2(UBLK_F_USER_RECOVERY)] = "USER_RECOVERY",
+		[const_ilog2(UBLK_F_USER_RECOVERY_REISSUE)] = "RECOVERY_REISSUE",
+		[const_ilog2(UBLK_F_UNPRIVILEGED_DEV)] = "UNPRIVILEGED_DEV",
+		[const_ilog2(UBLK_F_CMD_IOCTL_ENCODE)] = "CMD_IOCTL_ENCODE",
+	};
+
+	ret = ublksrv_ctrl_get_features(dev, &features);
+	if (!ret) {
+		int i;
+
+		printf("ublk_drv features: 0x%llx\n", features);
+
+		for (i = 0; i < sizeof(features); i++) {
+			const char *feat;
+
+			if (!((1ULL << i)  & features))
+				continue;
+			if (i < sizeof(feat_map) / sizeof(feat_map[0]))
+				feat = feat_map[i];
+			else
+				feat = "unknown";
+			printf("\t%-20s: 0x%llx\n", feat, 1ULL << i);
+		}
+	}
+
+	return ret;
+}
+
+static void cmd_dev_get_features_help(const char *cmd)
+{
+	printf("%s features\n", cmd);
+}
+
 static int __cmd_dev_user_recover(int number, bool verbose)
 {
 	const struct ublksrv_tgt_type *tgt_type;
@@ -928,6 +1081,16 @@ static int __cmd_dev_user_recover(int number, bool verbose)
 	int ret;
 
 	dev = ublksrv_ctrl_init(&data);
+	if (!dev) {
+		fprintf(stderr, "ublksrv_ctrl_init failure dev %d\n", number);
+		return -ENOMEM;
+	}
+
+	ret = ublksrv_ctrl_get_info(dev);
+	if (ret < 0) {
+		fprintf(stderr, "can't get dev info from %d\n", number);
+		goto fail;
+	}
 
 	ret = ublksrv_ctrl_start_recovery(dev);
 	if (ret < 0) {
@@ -965,12 +1128,6 @@ static int __cmd_dev_user_recover(int number, bool verbose)
 	if (ret < 0) {
 		fprintf(stderr, "can't delete old pid_file for %d, error:%s\n",
 				number, strerror(errno));
-		goto fail;
-	}
-
-	ret = ublksrv_ctrl_get_info(dev);
-	if (ret < 0) {
-		fprintf(stderr, "can't get dev info from %d\n", number);
 		goto fail;
 	}
 
@@ -1038,11 +1195,18 @@ static int cmd_dev_user_recover(int argc, char *argv[])
 	return __cmd_dev_user_recover(number, verbose);
 }
 
+static void cmd_dev_recover_usage(const char *cmd)
+{
+	printf("%s recover [-n DEV_ID]\n", cmd);
+}
+
 static void cmd_usage(const char *cmd)
 {
 	cmd_dev_add_usage(cmd);
 	cmd_dev_del_usage(cmd);
 	cmd_dev_list_usage(cmd);
+	cmd_dev_recover_usage(cmd);
+	cmd_dev_get_features_help(cmd);
 
 	printf("%s -v [--version]\n", cmd);
 	printf("%s -h [--help]\n", cmd);
@@ -1076,6 +1240,8 @@ int main(int argc, char *argv[])
 		ret = cmd_list_dev_info(argc, argv);
 	else if (!strcmp(cmd, "recover"))
 		ret = cmd_dev_user_recover(argc, argv);
+	else if (!strcmp(cmd, "features"))
+		ret = cmd_dev_get_features(argc, argv);
 	else if (!strcmp(cmd, "help") || !strcmp(cmd, "-h") || !strcmp(cmd, "--help")) {
 		cmd_usage(prog_name);
 		ret = EXIT_SUCCESS;

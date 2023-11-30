@@ -9,6 +9,16 @@ Tech
 2023
 ----
 
+`libublk(Rust) <https://crates.io/crates/libublk>`
+
+`ublk: virtual block devices in userspace(DevConf.CZ 2023) <https://www.youtube.com/watch?v=6JqNPirreoY>`
+
+`ublk: the new and improved way to serve SPDK storage locally! <https://spdk.io/news/2023/03/28/ublk/>`
+
+`btrfs-ublk <https://github.com/snarkmaster/btrfs-ublk>`
+
+`Zero-copy I/O for ublk, three different ways <https://lwn.net/Articles/926118/>`
+
 `qemu-storage-daemon ublk export - <https://gitlab.com/amarjargal.gundjalam/qemu/-/blob/ublk_test1/block/export/ublk.c>`
 
 `ublk Target - SPDK <https://spdk.io/doc/ublk.html>`
@@ -25,6 +35,8 @@ Tech
 `Hacker News: An io_uring-based user-space block driver (lwn.net) <https://news.ycombinator.com/item?id=32508659>`
 
 `io_uring in Android OTA <https://lpc.events/event/16/contributions/1331/>`
+
+`ublk user recovery design[Chinese] <https://developer.aliyun.com/article/1084548?spm=a2c6h.13262185.profile.7.52c8766fYUXyKA>`
 
 Uses
 ====
