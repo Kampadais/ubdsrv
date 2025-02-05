@@ -186,6 +186,9 @@ struct ublksrv_tgt_type {
 	 * has to be implemented. Otherwise, target can implement
 	 * ->handle_event() for processing io completion there.
 	 *
+	 * The return value is not checked. The user is responsible for handling
+	 * any failure.
+	 *
 	 *  Required.
 	 */
 	int (*handle_io_async)(const struct ublksrv_queue *,
@@ -425,6 +428,13 @@ extern int ublksrv_ctrl_add_dev(struct ublksrv_ctrl_dev *dev);
 extern int ublksrv_ctrl_del_dev(struct ublksrv_ctrl_dev *dev);
 
 /**
+ * Delete this ublk device asynchronously by sending command to ublk driver
+ *
+ * @param dev the ublksrv control device instance
+ */
+extern int ublksrv_ctrl_del_dev_async(struct ublksrv_ctrl_dev *dev);
+
+/**
  * Retrieve ublk device info by sending command to ublk control device
  *
  * @param dev the ublksrv control device instance
@@ -538,6 +548,13 @@ extern void ublksrv_ctrl_prep_recovery(struct ublksrv_ctrl_dev *dev,
  * @param dev the ublksrv control device instance
  */
 extern const char *ublksrv_ctrl_get_recovery_jbuf(const struct ublksrv_ctrl_dev *dev);
+
+/**
+ * Return true if this control device is for recovering
+ *
+ * @param dev the ublksrv control device instance
+ */
+extern bool ublksrv_is_recovering(const struct ublksrv_ctrl_dev *ctrl_dev);
 
 /** @} */ // end of ctrl_dev group
 
@@ -698,7 +715,7 @@ extern int ublksrv_json_read_target_str_info(const char *jbuf, int len,
  * @param val field value with ulong type
  */
 extern int ublksrv_json_read_target_ulong_info(const char *jbuf,
-		const char *name, long *val);
+		const char *name, unsigned long *val);
 
 /**
  * Serialize json buffer from target field with string type
@@ -852,6 +869,15 @@ extern const struct ublksrv_queue *ublksrv_queue_init(const struct ublksrv_dev *
  */
 extern void ublksrv_queue_deinit(const struct ublksrv_queue *q);
 
+/**
+ * Return how many unconsumed cqes in CQ of queue uring
+ *
+ * @param q the ublksrv queue instance
+ *
+ * Return -1 if uring isn't setup correctly
+ */
+extern int ublksrv_queue_unconsumed_cqes(const struct ublksrv_queue *q);
+
 extern int ublksrv_queue_handled_event(const struct ublksrv_queue *q);
 extern int ublksrv_queue_send_event(const struct ublksrv_queue *q);
 
@@ -889,6 +915,14 @@ extern int ublksrv_process_io(const struct ublksrv_queue *q);
  * @param res io result
  */
 extern int ublksrv_complete_io(const struct ublksrv_queue *q, unsigned tag, int res);
+
+/**
+ * Reap events received from queue
+ *
+ * @param tq the pointer for ublksrv_queue
+ */
+extern int ublksrv_queue_reap_events(const struct ublksrv_queue *tq);
+
 /** @} */ // end of ublksrv_queue group
 
 #ifdef __cplusplus

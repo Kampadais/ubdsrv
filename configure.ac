@@ -38,6 +38,15 @@ AX_PTHREAD
 dnl Check for C++.
 AC_PROG_CXX
 
+AS_CASE([$CXX],
+  [*clang++*], [ENABLE_CORO_FLAG=""],
+  [*g++*], [ENABLE_CORO_FLAG="-fcoroutines"],
+  [ENABLE_CORO_FLAG=""]
+)
+
+CXXFLAGS="$CXXFLAGS $ENABLE_CORO_FLAG"
+
+
 dnl --enable-gcc-warnings to turn on GCC warnings (for developers).
 AC_ARG_ENABLE([gcc-warnings],
     [AS_HELP_STRING([--enable-gcc-warnings],
@@ -143,6 +152,24 @@ else
   AC_DEFINE(NBD_LFS,0)
   AC_MSG_RESULT([no])
 fi
+
+ublk_control=/dev/ublk-control
+AC_ARG_WITH(
+  [ublk_control],
+  [AS_HELP_STRING([--with-ublk_control], [Set the ublk control device. Defaults to /dev/ublk-control.])],
+  [ublk_control="$withval"]
+  [],
+)
+AC_DEFINE_UNQUOTED([UBLK_CONTROL], ["${ublk_control}"], [ublk control device.])
+
+ublkc_prefix=/dev
+AC_ARG_WITH(
+  [ublkc_prefix],
+  [AS_HELP_STRING([--with-ublkc_prefix], [Set the directory prefix for ublkc devices. Defaults to /dev.])],
+  [ublkc_prefix="$withval"]
+  [],
+)
+AC_DEFINE_UNQUOTED([UBLKC_PREFIX], ["${ublkc_prefix}"], [prefix for ublkc devices.])
 
 AC_CHECK_PROGS([DOXYGEN], [doxygen])
 if test -z "$DOXYGEN"; then

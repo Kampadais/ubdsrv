@@ -6,7 +6,11 @@
 #include <sys/epoll.h>
 #include "ublksrv_tgt.h"
 
-static bool user_copy;
+struct loop_tgt_data {
+	bool user_copy;
+	bool block_device;
+	unsigned long offset;
+};
 
 static bool backing_supports_discard(char *name)
 {
@@ -40,9 +44,11 @@ static int loop_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 	const struct ublksrv_ctrl_dev_info *info =
 		ublksrv_ctrl_get_dev_info(ublksrv_get_ctrl_dev(dev));
 	int fd, ret;
-	long direct_io = 0;
+	unsigned long direct_io = 0;
 	struct ublk_params p;
 	char file[PATH_MAX];
+	struct loop_tgt_data *tgt_data = (struct loop_tgt_data*)dev->tgt.tgt_data;
+	struct stat sb;
 
 	ublk_assert(jbuf);
 
@@ -61,6 +67,14 @@ static int loop_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 		return ret;
 	}
 
+	ret = ublksrv_json_read_target_ulong_info(jbuf, "offset",
+			&tgt_data->offset);
+	if (ret) {
+		ublk_err( "%s: read target offset failed %d\n",
+				__func__, ret);
+		return ret;
+	}
+
 	ret = ublksrv_json_read_params(&p, jbuf);
 	if (ret) {
 		ublk_err( "%s: read ublk params failed %d\n",
@@ -75,6 +89,14 @@ static int loop_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 		return fd;
 	}
 
+	if (fstat(fd, &sb) < 0) {
+		ublk_err( "%s: unable to stat %s\n",
+				  __func__, file);
+		return -1;
+	}
+
+	tgt_data->block_device = S_ISBLK(sb.st_mode);
+
 	if (direct_io)
 		fcntl(fd, F_SETFL, O_DIRECT);
 
@@ -83,9 +105,10 @@ static int loop_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 	tgt->tgt_ring_depth = info->queue_depth;
 	tgt->nr_fds = 1;
 	tgt->fds[1] = fd;
-	user_copy = info->flags & UBLK_F_USER_COPY;
-	if (user_copy)
+	tgt_data->user_copy = info->flags & UBLK_F_USER_COPY;
+	if (tgt_data->user_copy)
 		tgt->tgt_ring_depth *= 2;
+
 
 	return 0;
 }
@@ -93,12 +116,11 @@ static int loop_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 static int loop_recovery_tgt(struct ublksrv_dev *dev, int type)
 {
 	const struct ublksrv_ctrl_dev *cdev = ublksrv_get_ctrl_dev(dev);
-	const struct ublksrv_ctrl_dev_info *info =
-		ublksrv_ctrl_get_dev_info(ublksrv_get_ctrl_dev(dev));
 	const char *jbuf = ublksrv_ctrl_get_recovery_jbuf(cdev);
 
 	ublk_assert(type == UBLKSRV_TGT_TYPE_LOOP);
-	ublk_assert(info->state == UBLK_S_DEV_QUIESCED);
+
+	dev->tgt.tgt_data = calloc(sizeof(struct loop_tgt_data), 1);
 
 	return loop_setup_tgt(dev, type, true, jbuf);
 }
@@ -112,6 +134,7 @@ static int loop_init_tgt(struct ublksrv_dev *dev, int type, int argc, char
 	static const struct option lo_longopts[] = {
 		{ "file",		1,	NULL, 'f' },
 		{ "buffered_io",	no_argument, &buffered_io, 1},
+		{ "offset",		required_argument, NULL, 'o'},
 		{ NULL }
 	};
 	unsigned long long bytes;
@@ -139,17 +162,21 @@ static int loop_init_tgt(struct ublksrv_dev *dev, int type, int argc, char
 		},
 	};
 	bool can_discard = false;
+	unsigned long offset = 0;
 
 	strcpy(tgt_json.name, "loop");
 
 	if (type != UBLKSRV_TGT_TYPE_LOOP)
 		return -1;
 
-	while ((opt = getopt_long(argc, argv, "-:f:",
+	while ((opt = getopt_long(argc, argv, "-:f:o:",
 				  lo_longopts, NULL)) != -1) {
 		switch (opt) {
 		case 'f':
 			file = strdup(optarg);
+			break;
+		case 'o':
+			offset = strtoul(optarg, NULL, 10);
 			break;
 		}
 	}
@@ -199,6 +226,17 @@ static int loop_init_tgt(struct ublksrv_dev *dev, int type, int argc, char
 		buffered_io = 1;
 	}
 
+	if (bytes > 0) {
+		unsigned long long offset_bytes = offset << 9;
+
+		if (offset_bytes >= bytes) {
+			ublk_err( "%s: offset %lu greater than device size %llu",
+					  __func__, offset, bytes);
+			return -2;
+		}
+		bytes -= offset_bytes;
+	}
+
 	tgt_json.dev_size = bytes;
 	p.basic.dev_sectors = bytes >> 9;
 
@@ -212,17 +250,21 @@ static int loop_init_tgt(struct ublksrv_dev *dev, int type, int argc, char
 	ublk_json_write_target_base(dev, &jbuf, &jbuf_size, &tgt_json);
 	ublk_json_write_tgt_str(dev, &jbuf, &jbuf_size, "backing_file", file);
 	ublk_json_write_tgt_long(dev, &jbuf, &jbuf_size, "direct_io", !buffered_io);
+	ublk_json_write_tgt_ulong(dev, &jbuf, &jbuf_size, "offset", offset);
 	ublk_json_write_params(dev, &jbuf, &jbuf_size, &p);
 
 	close(fd);
+
+	dev->tgt.tgt_data = calloc(sizeof(struct loop_tgt_data), 1);
 
 	return loop_setup_tgt(dev, type, false, jbuf);
 }
 
 static void loop_usage_for_add(void)
 {
-	printf("           loop: -f backing_file [--buffered_io]\n");
+	printf("           loop: -f backing_file [--buffered_io] [--offset NUM]\n");
 	printf("           	default is direct IO to backing file\n");
+	printf("           	offset skips first NUM sectors on backing file\n");
 }
 
 static inline int loop_fallocate_mode(const struct ublksrv_io_desc *iod)
@@ -250,8 +292,9 @@ static void loop_queue_tgt_read(const struct ublksrv_queue *q,
 		const struct ublksrv_io_desc *iod, int tag)
 {
 	unsigned ublk_op = ublksrv_get_op(iod);
+	const struct loop_tgt_data *tgt_data = (struct loop_tgt_data*) q->dev->tgt.tgt_data;
 
-	if (user_copy) {
+	if (tgt_data->user_copy) {
 		struct io_uring_sqe *sqe, *sqe2;
 		__u64 pos = ublk_pos(q->q_id, tag, 0);
 		void *buf = ublksrv_queue_get_io_buf(q, tag);
@@ -260,7 +303,7 @@ static void loop_queue_tgt_read(const struct ublksrv_queue *q,
 		io_uring_prep_read(sqe, 1 /*fds[1]*/,
 				buf,
 				iod->nr_sectors << 9,
-				iod->start_sector << 9);
+				(iod->start_sector + tgt_data->offset) << 9);
 		io_uring_sqe_set_flags(sqe, IOSQE_FIXED_FILE | IOSQE_IO_LINK);
 		sqe->user_data = build_user_data(tag, ublk_op, 1, 1);
 
@@ -277,7 +320,7 @@ static void loop_queue_tgt_read(const struct ublksrv_queue *q,
 		io_uring_prep_read(sqe, 1 /*fds[1]*/,
 			buf,
 			iod->nr_sectors << 9,
-			iod->start_sector << 9);
+			(iod->start_sector + tgt_data->offset) << 9);
 		io_uring_sqe_set_flags(sqe, IOSQE_FIXED_FILE);
 		sqe->user_data = build_user_data(tag, ublk_op, 0, 1);
 	}
@@ -287,8 +330,9 @@ static void loop_queue_tgt_write(const struct ublksrv_queue *q,
 		const struct ublksrv_io_desc *iod, int tag)
 {
 	unsigned ublk_op = ublksrv_get_op(iod);
+	const struct loop_tgt_data *tgt_data = (struct loop_tgt_data*) q->dev->tgt.tgt_data;
 
-	if (user_copy) {
+	if (tgt_data->user_copy) {
 		struct io_uring_sqe *sqe, *sqe2;
 		__u64 pos = ublk_pos(q->q_id, tag, 0);
 		void *buf = ublksrv_queue_get_io_buf(q, tag);
@@ -301,8 +345,9 @@ static void loop_queue_tgt_write(const struct ublksrv_queue *q,
 
 		io_uring_prep_write(sqe2, 1 /*fds[1]*/,
 			buf, iod->nr_sectors << 9,
-			iod->start_sector << 9);
+			(iod->start_sector + tgt_data->offset) << 9);
 		io_uring_sqe_set_flags(sqe2, IOSQE_FIXED_FILE);
+		sqe2->rw_flags |= RWF_DSYNC;
 		/* bit63 marks us as tgt io */
 		sqe2->user_data = build_user_data(tag, ublk_op, 0, 1);
 	} else {
@@ -313,8 +358,9 @@ static void loop_queue_tgt_write(const struct ublksrv_queue *q,
 		io_uring_prep_write(sqe, 1 /*fds[1]*/,
 			buf,
 			iod->nr_sectors << 9,
-			iod->start_sector << 9);
+			(iod->start_sector + tgt_data->offset) << 9);
 		io_uring_sqe_set_flags(sqe, IOSQE_FIXED_FILE);
+		sqe->rw_flags |= RWF_DSYNC;
 		/* bit63 marks us as tgt io */
 		sqe->user_data = build_user_data(tag, ublk_op, 0, 1);
 	}
@@ -326,13 +372,14 @@ static int loop_queue_tgt_io(const struct ublksrv_queue *q,
 	const struct ublksrv_io_desc *iod = data->iod;
 	struct io_uring_sqe *sqe;
 	unsigned ublk_op = ublksrv_get_op(iod);
+	const struct loop_tgt_data *tgt_data = (struct loop_tgt_data*) q->dev->tgt.tgt_data;
 
 	switch (ublk_op) {
 	case UBLK_IO_OP_FLUSH:
 		ublk_get_sqe_pair(q->ring_ptr, &sqe, NULL);
 		io_uring_prep_sync_file_range(sqe, 1 /*fds[1]*/,
 				iod->nr_sectors << 9,
-				iod->start_sector << 9,
+				(iod->start_sector + tgt_data->offset) << 9,
 				IORING_FSYNC_DATASYNC);
 		io_uring_sqe_set_flags(sqe, IOSQE_FIXED_FILE);
 		/* bit63 marks us as tgt io */
@@ -343,7 +390,7 @@ static int loop_queue_tgt_io(const struct ublksrv_queue *q,
 		ublk_get_sqe_pair(q->ring_ptr, &sqe, NULL);
 		io_uring_prep_fallocate(sqe, 1 /*fds[1]*/,
 				loop_fallocate_mode(iod),
-				iod->start_sector << 9,
+				(iod->start_sector + tgt_data->offset) << 9,
 				iod->nr_sectors << 9);
 		io_uring_sqe_set_flags(sqe, IOSQE_FIXED_FILE);
 		/* bit63 marks us as tgt io */
@@ -397,8 +444,21 @@ static int loop_handle_io_async(const struct ublksrv_queue *q,
 		const struct ublk_io_data *data)
 {
 	struct ublk_io_tgt *io = __ublk_get_io_tgt_data(data);
+	const struct loop_tgt_data *tgt_data = (struct loop_tgt_data*) q->dev->tgt.tgt_data;
 
-	io->co = __loop_handle_io_async(q, data, data->tag);
+	if (tgt_data->block_device && ublksrv_get_op(data->iod) == UBLK_IO_OP_DISCARD) {
+		__u64 r[2];
+		int res;
+
+		io_uring_submit(q->ring_ptr);
+
+		r[0] = (data->iod->start_sector + tgt_data->offset) << 9;
+		r[1] = data->iod->nr_sectors << 9;
+		res = ioctl(q->dev->tgt.fds[1], BLKDISCARD, &r);
+		ublksrv_complete_io(q, data->tag, res);
+	} else {
+		io->co = __loop_handle_io_async(q, data, data->tag);
+	}
 	return 0;
 }
 
@@ -426,6 +486,7 @@ static void loop_deinit_tgt(const struct ublksrv_dev *dev)
 {
 	fsync(dev->tgt.fds[1]);
 	close(dev->tgt.fds[1]);
+	free(dev->tgt.tgt_data);
 }
 
 struct ublksrv_tgt_type  loop_tgt_type = {

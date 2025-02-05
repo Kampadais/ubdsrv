@@ -800,7 +800,7 @@ static int nbd_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 	char *tlshostname = NULL;
 	bool tls = false;
 
-	long send_zc = 0;
+	unsigned long send_zc = 0;
 
 
 	if (info->flags & UBLK_F_USER_COPY)
@@ -808,7 +808,6 @@ static int nbd_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 
 	ublk_assert(jbuf);
 	ublk_assert(type == UBLKSRV_TGT_TYPE_NBD);
-	ublk_assert(!recovery || info->state == UBLK_S_DEV_QUIESCED);
 
 	ublksrv_json_read_target_str_info(jbuf, NBD_MAX_NAME, "host",
 			host_name);
@@ -818,7 +817,7 @@ static int nbd_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 			exp_name);
 	ublksrv_json_read_target_ulong_info(jbuf, "send_zc", &send_zc);
 
-	NBD_HS_DBG("%s: host %s unix %s exp_name %s send_zc\n", __func__,
+	NBD_HS_DBG("%s: host %s unix %s exp_name %s send_zc: %lu\n", __func__,
 			host_name, unix_path, exp_name, send_zc);
 	for (i = 0; i < info->nr_hw_queues; i++) {
 		int sock;
@@ -834,8 +833,10 @@ static int nbd_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 					needed_flags, cflags, opts, certfile,
 					keyfile, cacertfile, tlshostname, tls,
 					can_opt_go);
-		else
+		else {
 			ublk_err("%s: open socket failed %d\n", __func__, sock);
+			return sock;
+		}
 
 		tgt->fds[i + 1] = sock;
 		NBD_HS_DBG("%s:qid %d %s-%s size %luMB flags %x sock %d\n",
@@ -919,6 +920,10 @@ static int nbd_init_tgt(struct ublksrv_dev *dev, int type, int argc,
 	const char *exp_name = NULL;
 	uint16_t flags = 0;
 	int ret;
+	unsigned int attrs = UBLK_ATTR_VOLATILE_CACHE;
+
+	if (read_only)
+		attrs |= UBLK_ATTR_READ_ONLY;
 
 	strcpy(tgt_json.name, "nbd");
 
@@ -963,7 +968,7 @@ static int nbd_init_tgt(struct ublksrv_dev *dev, int type, int argc,
 	struct ublk_params p = {
 		.types = UBLK_PARAM_TYPE_BASIC,
 		.basic = {
-			.attrs = read_only ? UBLK_ATTR_READ_ONLY : 0U,
+			.attrs = attrs,
 			.logical_bs_shift	= bs_shift,
 			.physical_bs_shift	= 12,
 			.io_opt_shift		= 12,

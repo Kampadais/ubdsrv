@@ -4,7 +4,11 @@
 
 #include "ublksrv_priv.h"
 
+#ifdef UBLK_CONTROL
+#define	CTRL_DEV	UBLK_CONTROL
+#else
 #define	CTRL_DEV	"/dev/ublk-control"
+#endif
 
 #define CTRL_CMD_HAS_DATA	1
 #define CTRL_CMD_HAS_BUF	2
@@ -119,7 +123,9 @@ static int __ublksrv_ctrl_cmd(struct ublksrv_ctrl_dev *dev,
 		return ret;
 	}
 
-	ret = io_uring_wait_cqe(&dev->ring, &cqe);
+	do {
+		ret = io_uring_wait_cqe(&dev->ring, &cqe);
+	} while (ret == -EINTR);
 	if (ret < 0) {
 		fprintf(stderr, "wait cqe: %s\n", strerror(-ret));
 		return ret;
@@ -141,6 +147,7 @@ void ublksrv_ctrl_deinit(struct ublksrv_ctrl_dev *dev)
 
 struct ublksrv_ctrl_dev *ublksrv_ctrl_init(struct ublksrv_dev_data *data)
 {
+	struct io_uring_params p;
 	struct ublksrv_ctrl_dev *dev = (struct ublksrv_ctrl_dev *)calloc(1,
 			sizeof(*dev));
 	struct ublksrv_ctrl_dev_info *info = &dev->dev_info;
@@ -167,7 +174,8 @@ struct ublksrv_ctrl_dev *ublksrv_ctrl_init(struct ublksrv_dev_data *data)
 	dev->tgt_argv = data->tgt_argv;
 
 	/* 32 is enough to send ctrl commands */
-	ret = ublksrv_setup_ring(&dev->ring, 32, 32, IORING_SETUP_SQE128);
+	ublksrv_setup_ring_params(&p, 32, IORING_SETUP_SQE128);
+	ret = io_uring_queue_init_params(32, &dev->ring, &p);
 	if (ret < 0) {
 		fprintf(stderr, "queue_init: %s\n", strerror(-ret));
 		free(dev);
@@ -287,6 +295,18 @@ int ublksrv_ctrl_add_dev(struct ublksrv_ctrl_dev *dev)
 		return __ublksrv_ctrl_add_dev(dev, UBLK_CMD_ADD_DEV);
 
 	return ret;
+}
+
+int ublksrv_ctrl_del_dev_async(struct ublksrv_ctrl_dev *dev)
+{
+	struct ublksrv_ctrl_cmd_data data = {
+		.cmd_op = UBLK_U_CMD_DEL_DEV_ASYNC,
+		.flags = CTRL_CMD_NO_TRANS,
+	};
+
+	ublk_un_privileged_prep_data(dev, data);
+
+	return __ublksrv_ctrl_cmd(dev, &data);
 }
 
 int ublksrv_ctrl_del_dev(struct ublksrv_ctrl_dev *dev)
@@ -426,6 +446,8 @@ static const char *ublksrv_dev_state_desc(struct ublksrv_ctrl_dev *dev)
 		return "LIVE";
 	case UBLK_S_DEV_QUIESCED:
 		return "QUIESCED";
+	case UBLK_S_DEV_FAIL_IO:
+		return "FAIL_IO";
 	default:
 		return "UNKNOWN";
 	};
@@ -443,41 +465,33 @@ void ublksrv_ctrl_dump(struct ublksrv_ctrl_dev *dev, const char *jbuf)
 		return;
 	}
 
-    //print device info in json format
-    printf("{\"dev_id\" : %d , \"nr_hw_queues\" : %d , \"queue_depth\" : %d , \"block_size\" : %d , \"dev_capacity\" : %lld , \"max_rq_size\" : %d , \"daemon_pid\" : %d }",
-            info->dev_id,
-            info->nr_hw_queues, info->queue_depth,
-            1 << p.basic.logical_bs_shift, p.basic.dev_sectors,
-            info->max_io_buf_bytes,
-            info->ublksrv_pid);
+	printf("dev id %d: nr_hw_queues %d queue_depth %d block size %d dev_capacity %lld\n",
+			info->dev_id,
+                        info->nr_hw_queues, info->queue_depth,
+                        1 << p.basic.logical_bs_shift, p.basic.dev_sectors);
+	printf("\tmax rq size %d daemon pid %d flags 0x%llx state %s\n",
+                        info->max_io_buf_bytes,
+			info->ublksrv_pid, info->flags,
+			ublksrv_dev_state_desc(dev));
+	printf("\tublkc: %u:%d ublkb: %u:%u owner: %u:%u\n",
+			p.devt.char_major, p.devt.char_minor,
+			p.devt.disk_major, p.devt.disk_minor,
+			info->owner_uid, info->owner_gid);
 
-//	printf("dev id %d: nr_hw_queues %d queue_depth %d block size %d dev_capacity %lld\n",
-//			info->dev_id,
-//                        info->nr_hw_queues, info->queue_depth,
-//                        1 << p.basic.logical_bs_shift, p.basic.dev_sectors);
-//	printf("\tmax rq size %d daemon pid %d flags 0x%llx state %s\n",
-//                        info->max_io_buf_bytes,
-//			info->ublksrv_pid, info->flags,
-//			ublksrv_dev_state_desc(dev));
-//	printf("\tublkc: %u:%d ublkb: %u:%u owner: %u:%u\n",
-//			p.devt.char_major, p.devt.char_minor,
-//			p.devt.disk_major, p.devt.disk_minor,
-//			info->owner_uid, info->owner_gid);
+	if (jbuf) {
+		char buf[512];
 
-//	if (jbuf) {
-//		char buf[512];
-//
-//		for(i = 0; i < info->nr_hw_queues; i++) {
-//			unsigned tid;
-//
-//			ublksrv_json_read_queue_info(jbuf, i, &tid, buf, 512);
-//			printf("\tqueue %u: tid %d affinity(%s)\n",
-//					i, tid, buf);
-//		}
-//
-//		ublksrv_json_read_target_info(jbuf, buf, 512);
-//		printf("\ttarget %s\n", buf);
-//	}
+		for(i = 0; i < info->nr_hw_queues; i++) {
+			unsigned tid;
+
+			ublksrv_json_read_queue_info(jbuf, i, &tid, buf, 512);
+			printf("\tqueue %u: tid %d affinity(%s)\n",
+					i, tid, buf);
+		}
+
+		ublksrv_json_read_target_info(jbuf, buf, 512);
+		printf("\ttarget %s\n", buf);
+	}
 }
 
 int ublksrv_ctrl_set_params(struct ublksrv_ctrl_dev *dev,
@@ -597,6 +611,7 @@ void ublksrv_ctrl_prep_recovery(struct ublksrv_ctrl_dev *dev,
 {
 	dev->tgt_type = tgt_type;
 	dev->tgt_ops = tgt_ops;
+	dev->tgt_argc = -1;
 	dev->recovery_jbuf = recovery_jbuf;
 }
 

@@ -26,7 +26,11 @@
 
 
 /* todo: relace the hardcode name with /dev/char/maj:min */
-#define UBLKC_DEV	"/dev/ublkc"
+#ifdef UBLKC_PREFIX
+#define	UBLKC_DEV	UBLKC_PREFIX "/ublkc"
+#else
+#define	UBLKC_DEV	"/dev/ublkc"
+#endif
 #define UBLKC_PATH_MAX	32
 
 #ifdef __cplusplus
@@ -55,8 +59,11 @@ struct ublksrv_ctrl_dev {
 			int tgt_argc;
 			char **tgt_argv;
 		};
-		/* used by ->recovery_tgt() */
-		const char *recovery_jbuf;
+		/* used by ->recovery_tgt(), tgt_argc == -1 */
+		struct {
+			int padding;
+			const char *recovery_jbuf;
+		};
 	};
 
 	cpu_set_t *queues_cpuset;
@@ -208,17 +215,12 @@ static inline int is_target_io(__u64 user_data)
 	return (user_data & (1ULL << 63)) != 0;
 }
 
-/* two helpers for setting up io_uring */
-static inline int ublksrv_setup_ring(struct io_uring *r, int depth,
+static inline void ublksrv_setup_ring_params(struct io_uring_params *p,
 		int cq_depth, unsigned flags)
 {
-	struct io_uring_params p;
-
-	memset(&p, 0, sizeof(p));
-	p.flags = flags | IORING_SETUP_CQSIZE;
-	p.cq_entries = cq_depth;
-
-	return io_uring_queue_init_params(depth, r, &p);
+	memset(p, 0, sizeof(*p));
+	p->flags = flags | IORING_SETUP_CQSIZE;
+	p->cq_entries = cq_depth;
 }
 
 static inline struct io_uring_sqe *ublksrv_uring_get_sqe(struct io_uring *r,
