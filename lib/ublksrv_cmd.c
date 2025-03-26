@@ -464,34 +464,41 @@ void ublksrv_ctrl_dump(struct ublksrv_ctrl_dev *dev, const char *jbuf)
 		fprintf(stderr, "failed to get params %m\n");
 		return;
 	}
-
-	printf("dev id %d: nr_hw_queues %d queue_depth %d block size %d dev_capacity %lld\n",
+	//print device info in json format
+	printf("{\"dev_id\" : %d , \"nr_hw_queues\" : %d , \"queue_depth\" : %d , \"block_size\" : %d , \"dev_capacity\" : %lld , \"max_rq_size\" : %d , \"daemon_pid\" : %d }",
 			info->dev_id,
-                        info->nr_hw_queues, info->queue_depth,
-                        1 << p.basic.logical_bs_shift, p.basic.dev_sectors);
-	printf("\tmax rq size %d daemon pid %d flags 0x%llx state %s\n",
-                        info->max_io_buf_bytes,
-			info->ublksrv_pid, info->flags,
-			ublksrv_dev_state_desc(dev));
-	printf("\tublkc: %u:%d ublkb: %u:%u owner: %u:%u\n",
-			p.devt.char_major, p.devt.char_minor,
-			p.devt.disk_major, p.devt.disk_minor,
-			info->owner_uid, info->owner_gid);
+			info->nr_hw_queues, info->queue_depth,
+			1 << p.basic.logical_bs_shift, p.basic.dev_sectors,
+			info->max_io_buf_bytes,
+			info->ublksrv_pid);
 
-	if (jbuf) {
-		char buf[512];
+	//	printf("dev id %d: nr_hw_queues %d queue_depth %d block size %d dev_capacity %lld\n",
+	//			info->dev_id,
+	//                        info->nr_hw_queues, info->queue_depth,
+	//                        1 << p.basic.logical_bs_shift, p.basic.dev_sectors);
+	//	printf("\tmax rq size %d daemon pid %d flags 0x%llx state %s\n",
+	//                        info->max_io_buf_bytes,
+	//			info->ublksrv_pid, info->flags,
+	//			ublksrv_dev_state_desc(dev));
+	//	printf("\tublkc: %u:%d ublkb: %u:%u owner: %u:%u\n",
+	//			p.devt.char_major, p.devt.char_minor,
+	//			p.devt.disk_major, p.devt.disk_minor,
+	//			info->owner_uid, info->owner_gid);
 
-		for(i = 0; i < info->nr_hw_queues; i++) {
-			unsigned tid;
-
-			ublksrv_json_read_queue_info(jbuf, i, &tid, buf, 512);
-			printf("\tqueue %u: tid %d affinity(%s)\n",
-					i, tid, buf);
-		}
-
-		ublksrv_json_read_target_info(jbuf, buf, 512);
-		printf("\ttarget %s\n", buf);
-	}
+	//	if (jbuf) {
+	//		char buf[512];
+	//
+	//		for(i = 0; i < info->nr_hw_queues; i++) {
+	//			unsigned tid;
+	//
+	//			ublksrv_json_read_queue_info(jbuf, i, &tid, buf, 512);
+	//			printf("\tqueue %u: tid %d affinity(%s)\n",
+	//					i, tid, buf);
+	//		}
+	//
+	//		ublksrv_json_read_target_info(jbuf, buf, 512);
+	//		printf("\ttarget %s\n", buf);
+	//	}
 }
 
 int ublksrv_ctrl_set_params(struct ublksrv_ctrl_dev *dev,
