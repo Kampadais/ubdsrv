@@ -198,7 +198,7 @@ __ublk_get_dev_state() {
 	local dev_id=`__ublk_dev_id $dev`
 
 	eval $UBLK list -n ${dev_id} > ${UBLK_TMP}
-	state=`cat ${UBLK_TMP} | grep "state" | awk '{print $11}'`
+	state=`cat ${UBLK_TMP} | grep "state" | awk '{print $9}'`
 	echo $state
 }
 
@@ -240,7 +240,7 @@ __create_ublk_dev()
 	[ ${id} == "-" ] && echo "no free ublk device nodes" && exit -1
 	eval $UBLK add ${T_TYPE_PARAMS} -n $id > /dev/null 2>&1
 	udevadm settle
-	if [ -b /dev/ublkb0 ]; then
+	if [ -b /dev/ublkb${id} ]; then
 		echo "/dev/ublkb${id}"
 	else
 		echo "/dev/ublkb-unknown"
@@ -252,9 +252,43 @@ __recover_ublk_dev()
 	local dev=$1
 	local dev_id=`__ublk_dev_id $dev`
 
-	eval $UBLK recover -n $dev_id
+	eval $UBLK recover -n $dev_id > /dev/null 2>&1
 	RES=$?
 	echo $RES
+}
+
+# kill the ublk daemon and return ublk device state
+__ublk_kill_daemon()
+{
+	local dev=$1
+	local exp_state=$2
+	local secs=0
+	local daemon_pid=`__ublk_get_pid $dev`
+	local state=`__ublk_get_dev_state $dev 0`
+
+	while [ $secs -lt 30 ] && [ "$state" != "$exp_state" ]; do
+		kill -9 $daemon_pid > /dev/null 2>&1
+		sleep 1
+		state=`__ublk_get_dev_state $dev 0`
+		let secs++
+	done
+	echo $state
+}
+
+recover_ublk_dev_and_wait()
+{
+	local dev=$1
+	local secs=0
+	local state=""
+
+	while [ $secs -lt 15 ]; do
+		__recover_ublk_dev $dev > /dev/null 2>&1
+		state=`__ublk_get_dev_state $dev 0`
+		[ "$state" == "LIVE" ] && break
+		sleep 1
+		let secs++
+	done
+	echo $state
 }
 
 __get_cpu_utils()

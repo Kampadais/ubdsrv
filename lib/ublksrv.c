@@ -10,7 +10,7 @@
 
 bool ublksrv_is_recovering(const struct ublksrv_ctrl_dev *ctrl_dev)
 {
-	return ctrl_dev->tgt_argc == -1;
+	return ctrl_dev->tgt_argc == -1 || ctrl_dev->data->recover;
 }
 
 static inline struct ublksrv_io_desc *ublksrv_get_iod(
@@ -83,10 +83,15 @@ static int __ublksrv_tgt_init(struct _ublksrv_dev *dev, const char *type_name,
 		else
 			ret = 0;
 	} else {
+		/* driver can recover via ->init_tgt() */
 		if (ops->recovery_tgt)
 			ret = ops->recovery_tgt(local_to_tdev(dev), type);
-		else
-			ret = -ENOTSUP;
+		else {
+			if (ops->init_tgt)
+				ret = ops->init_tgt(local_to_tdev(dev), type, argc, argv);
+			else
+				ret = -ENOTSUP;
+		}
 	}
 	if (ret) {
 		tgt->ops = NULL;
@@ -127,6 +132,16 @@ static void ublksrv_tgt_deinit(struct _ublksrv_dev *dev)
 		tgt->ops->deinit_tgt(local_to_tdev(dev));
 }
 
+static inline bool ublksrv_queue_use_buf(const struct _ublksrv_queue *q)
+{
+	return !(q->state & UBLKSRV_USER_COPY);
+}
+
+static inline bool ublksrv_queue_alloc_buf(const struct _ublksrv_queue *q)
+{
+	return true;
+}
+
 static inline int ublksrv_queue_io_cmd(struct _ublksrv_queue *q,
 		struct ublk_io *io, unsigned tag)
 {
@@ -152,7 +167,7 @@ static inline int ublksrv_queue_io_cmd(struct _ublksrv_queue *q,
 	else if (io->flags & UBLKSRV_NEED_FETCH_RQ)
 		cmd_op = UBLK_IO_FETCH_REQ;
 
-	sqe = io_uring_get_sqe(&q->ring);
+	sqe = ublksrv_alloc_sqe(&q->ring);
 	if (!sqe) {
 		ublk_err("%s: run out of sqe %d, tag %d\n",
 				__func__, q->q_id, tag);
@@ -174,7 +189,7 @@ static inline int ublksrv_queue_io_cmd(struct _ublksrv_queue *q,
 	sqe->flags	= IOSQE_FIXED_FILE;
 	sqe->rw_flags	= 0;
 	cmd->tag	= tag;
-	if (!(q->state & UBLKSRV_USER_COPY))
+	if (ublksrv_queue_use_buf(q))
 		cmd->addr	= (__u64)io->buf_addr;
 	else
 		cmd->addr	= 0;
@@ -296,10 +311,16 @@ static void ublksrv_submit_fetch_commands(struct _ublksrv_queue *q)
 	__ublksrv_queue_event(q);
 }
 
-static int ublksrv_queue_is_done(struct _ublksrv_queue *q)
+static inline int __ublksrv_queue_is_done(const struct _ublksrv_queue *q)
 {
 	return (q->state & UBLKSRV_QUEUE_STOPPING) &&
 		!io_uring_sq_ready(&q->ring);
+}
+
+int ublksrv_queue_is_done(const struct ublksrv_queue *tq)
+{
+	const struct _ublksrv_queue *q = tq_to_local(tq);
+	return __ublksrv_queue_is_done(q);
 }
 
 /* used for allocating zero copy vma space */
@@ -570,6 +591,9 @@ const struct ublksrv_queue *ublksrv_queue_init(const struct ublksrv_dev *tdev,
 
 		/* extra ios needn't to allocate io buffer */
 		if (i >= q->q_depth)
+			goto skip_alloc_buf;
+
+		if (!ublksrv_queue_alloc_buf(q))
 			goto skip_alloc_buf;
 
 		if (dev->tgt.ops->alloc_io_buf)
@@ -937,7 +961,7 @@ int ublksrv_process_io(const struct ublksrv_queue *tq)
 				q->cmd_inflight, q->tgt_io_inflight,
 				(q->state & UBLKSRV_QUEUE_STOPPING));
 
-	if (ublksrv_queue_is_done(q))
+	if (__ublksrv_queue_is_done(q))
 		return -ENODEV;
 
 	ret = io_uring_submit_and_wait_timeout(&q->ring, &cqe, 1, tsp, NULL);

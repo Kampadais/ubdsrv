@@ -35,10 +35,6 @@ static inline unsigned ilog2(unsigned x)
 }
 
 #define MAX_NR_UBLK_DEVS	128
-#define UBLKSRV_PID_DIR  "/tmp/ublksrvd"
-
-/* json device data is stored at this offset of pid file */
-#define JSON_OFFSET   32
 
 char *ublksrv_tgt_return_json_buf(struct ublksrv_dev *dev, int *size);
 char *ublksrv_tgt_realloc_json_buf(struct ublksrv_dev *dev, int *size);
@@ -99,6 +95,11 @@ struct ublk_io_tgt {
 	co_handle_type co;
 	const struct io_uring_cqe *tgt_io_cqe;
 	int queued_tgt_io;	/* obsolete */
+};
+
+enum {
+	UBLK_IO_TGT_BUF = 1, 	/* buffer operation */
+	UBLK_IO_TGT_IO, 	/* io operation */
 };
 
 static inline struct ublk_io_tgt *__ublk_get_io_tgt_data(const struct ublk_io_data *io)
@@ -167,18 +168,6 @@ static inline bool ublk_param_is_valid(const struct ublk_params *p)
 	return true;
 }
 
-int ublk_json_write_tgt_str(struct ublksrv_dev *dev, char **jbuf,
-		int *len, const char *name, const char *val);
-int ublk_json_write_tgt_long(struct ublksrv_dev *dev, char **jbuf,
-		int *len, const char *name, long val);
-int ublk_json_write_tgt_ulong(struct ublksrv_dev *dev, char **jbuf,
-		int *len, const char *name, unsigned long val);
-int ublk_json_write_dev_info(struct ublksrv_dev *dev, char **jbuf, int *len);
-int ublk_json_write_params(struct ublksrv_dev *dev, char **jbuf, int *len,
-		const struct ublk_params *p);
-int ublk_json_write_target_base(struct ublksrv_dev *dev, char **jbuf, int *len,
-		const struct ublksrv_tgt_base_json *tgt);
-
 static inline void ublk_get_sqe_pair(struct io_uring *r,
 		struct io_uring_sqe **sqe, struct io_uring_sqe **sqe2)
 {
@@ -189,6 +178,48 @@ static inline void ublk_get_sqe_pair(struct io_uring *r,
 	*sqe = io_uring_get_sqe(r);
 	if (sqe2)
 		*sqe2 = io_uring_get_sqe(r);
+}
+
+static inline enum io_uring_op ublk_to_uring_fs_op(const struct ublksrv_io_desc *iod)
+{
+	unsigned ublk_op = ublksrv_get_op(iod);
+
+	if (ublk_op == UBLK_IO_OP_READ)
+		return IORING_OP_READ;
+	else if (ublk_op == UBLK_IO_OP_WRITE)
+		return IORING_OP_WRITE;
+	assert(0);
+}
+
+int ublksrv_tgt_send_dev_event(int evtfd, int dev_id);
+
+void ublksrv_print_std_opts(void);
+char *ublksrv_pop_cmd(int *argc, char *argv[]);
+int ublksrv_tgt_cmd_main(const struct ublksrv_tgt_type *tgt_type, int argc, char *argv[]);
+
+/* called after one cqe is received */
+static inline int ublksrv_tgt_process_cqe(const struct ublk_io_tgt *io, int *io_res)
+{
+	const struct io_uring_cqe *cqe = io->tgt_io_cqe;
+
+	assert(cqe);
+
+	if (cqe->res != -EAGAIN &&
+		user_data_to_tgt_data(cqe->user_data) == UBLK_IO_TGT_IO)
+			*io_res = cqe->res;
+	return cqe->res;
+}
+
+static inline void ublksrv_tgt_io_done(const struct ublksrv_queue *q,
+		const struct ublk_io_data *data,
+		const struct io_uring_cqe *cqe)
+{
+	int tag = user_data_to_tag(cqe->user_data);
+	struct ublk_io_tgt *io = __ublk_get_io_tgt_data(data);
+
+	ublk_assert(tag == data->tag);
+	io->tgt_io_cqe = cqe;
+	io->co.resume();
 }
 
 #endif

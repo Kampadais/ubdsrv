@@ -21,8 +21,6 @@
 #include "ublksrv_utils.h"
 #include "ublksrv_aio.h"
 
-#define UBLKSRV_TGT_TYPE_DEMO  0
-
 static bool use_aio = 0;
 static int backing_fd = -1;
 
@@ -38,9 +36,6 @@ struct demo_queue_info {
 
 static struct ublksrv_ctrl_dev *this_ctrl_dev;
 static const struct ublksrv_dev *this_dev;
-
-static pthread_mutex_t jbuf_lock;
-static char jbuf[4096];
 
 static void sig_handler(int sig)
 {
@@ -326,10 +321,8 @@ static void *demo_event_io_handler_fn(void *data)
 	unsigned short q_id = info->qid;
 	const struct ublksrv_queue *q;
 
-	pthread_mutex_lock(&jbuf_lock);
-	ublksrv_json_write_queue_info(ublksrv_get_ctrl_dev(dev), jbuf, sizeof jbuf,
-			q_id, ublksrv_gettid());
-	pthread_mutex_unlock(&jbuf_lock);
+	ublk_json_write_queue_info(ublksrv_get_ctrl_dev(dev), q_id, ublksrv_gettid());
+	ublk_tgt_store_dev_data(dev);
 
 	q = ublksrv_queue_init(dev, q_id, info);
 	if (!q) {
@@ -369,9 +362,7 @@ static void demo_event_set_parameters(struct ublksrv_ctrl_dev *cdev,
 	};
 	int ret;
 
-	pthread_mutex_lock(&jbuf_lock);
-	ublksrv_json_write_params(&p, jbuf, sizeof jbuf);
-	pthread_mutex_unlock(&jbuf_lock);
+	ublk_json_write_params(cdev, &p);
 
 	ret = ublksrv_ctrl_set_params(cdev, &p);
 	if (ret)
@@ -433,7 +424,7 @@ static int demo_event_io_handler(struct ublksrv_ctrl_dev *ctrl_dev)
 		goto fail;
 
 	ublksrv_ctrl_get_info(ctrl_dev);
-	ublksrv_ctrl_dump(ctrl_dev, jbuf);
+	ublk_ctrl_dump(ctrl_dev);
 
 	/* wait until we are terminated */
 	for (i = 0; i < dinfo->nr_hw_queues; i++) {
@@ -451,7 +442,7 @@ fail:
 	return ret;
 }
 
-static int ublksrv_start_daemon(struct ublksrv_ctrl_dev *ctrl_dev)
+static int event_start_daemon(struct ublksrv_ctrl_dev *ctrl_dev)
 {
 	if (ublksrv_ctrl_get_affinity(ctrl_dev) < 0)
 		return -1;
@@ -471,9 +462,6 @@ static int demo_init_tgt(struct ublksrv_dev *dev, int type, int argc,
 	struct stat st;
 
 	strcpy(tgt_json.name, "demo_event");
-
-	if (type != UBLKSRV_TGT_TYPE_DEMO)
-		return -1;
 
 	if (backing_fd > 0) {
 		unsigned long long bytes;
@@ -497,8 +485,8 @@ static int demo_init_tgt(struct ublksrv_dev *dev, int type, int argc,
 	tgt->tgt_ring_depth = info->queue_depth;
 	tgt->nr_fds = 0;
 
-	ublksrv_json_write_dev_info(ublksrv_get_ctrl_dev(dev), jbuf, sizeof jbuf);
-	ublksrv_json_write_target_base_info(jbuf, sizeof jbuf, &tgt_json);
+	ublk_json_write_dev_info(ublksrv_get_ctrl_dev(dev));
+	ublk_json_write_target_base(ublksrv_get_ctrl_dev(dev), &tgt_json);
 
 	return 0;
 }
@@ -522,7 +510,6 @@ static void demo_handle_event(const struct ublksrv_queue *q)
 }
 
 static const struct ublksrv_tgt_type demo_event_tgt_type = {
-	.type	= UBLKSRV_TGT_TYPE_DEMO,
 	.name	=  "demo_event",
 	.init_tgt = demo_init_tgt,
 	.handle_io_async = demo_handle_io_async,
@@ -544,6 +531,7 @@ int main(int argc, char *argv[])
 		.queue_depth = DEF_QD,
 		.tgt_type = "demo_event",
 		.tgt_ops = &demo_event_tgt_type,
+		.run_dir = ublksrv_get_pid_dir(),
 		.flags = 0,
 	};
 	struct ublksrv_ctrl_dev *dev;
@@ -574,8 +562,6 @@ int main(int argc, char *argv[])
 	if (signal(SIGINT, sig_handler) == SIG_ERR)
 		error(EXIT_FAILURE, errno, "signal");
 
-	pthread_mutex_init(&jbuf_lock, NULL);
-
 	data.ublksrv_flags = UBLKSRV_F_NEED_EVENTFD;
 	dev = ublksrv_ctrl_init(&data);
 	if (!dev)
@@ -589,7 +575,7 @@ int main(int argc, char *argv[])
 		goto fail;
 	}
 
-	ret = ublksrv_start_daemon(dev);
+	ret = event_start_daemon(dev);
 	if (ret < 0) {
 		error(0, -ret, "can't start daemon");
 		goto fail_del_dev;

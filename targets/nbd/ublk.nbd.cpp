@@ -725,11 +725,6 @@ static void nbd_handle_io_bg(const struct ublksrv_queue *q, int nr_queued_io)
 				q_data->chained_send_ios);
 }
 
-static void nbd_usage_for_add(void)
-{
-	printf("           nbd: --host=$HOST [--port=$PORT] | --unix=$UNIX_PATH\n");
-}
-
 static int nbd_init_queue(const struct ublksrv_queue *q,
 		void **queue_data_ptr)
 {
@@ -775,11 +770,11 @@ static void nbd_deinit_tgt(const struct ublksrv_dev *dev)
 }
 
 static int nbd_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
-		const char *jbuf, uint16_t *flags)
+		uint16_t *flags)
 {
 	struct ublksrv_tgt_info *tgt = &dev->tgt;
-	const struct ublksrv_ctrl_dev_info *info =
-		ublksrv_ctrl_get_dev_info(ublksrv_get_ctrl_dev(dev));
+	const struct ublksrv_ctrl_dev *cdev = ublksrv_get_ctrl_dev(dev);
+	const struct ublksrv_ctrl_dev_info *info = ublksrv_ctrl_get_dev_info(cdev);
 	int i;
 	struct nbd_tgt_data *data = (struct nbd_tgt_data *)dev->tgt.tgt_data;
 
@@ -806,16 +801,10 @@ static int nbd_setup_tgt(struct ublksrv_dev *dev, int type, bool recovery,
 	if (info->flags & UBLK_F_USER_COPY)
 		return -EINVAL;
 
-	ublk_assert(jbuf);
-	ublk_assert(type == UBLKSRV_TGT_TYPE_NBD);
-
-	ublksrv_json_read_target_str_info(jbuf, NBD_MAX_NAME, "host",
-			host_name);
-	ublksrv_json_read_target_str_info(jbuf, NBD_MAX_NAME, "unix",
-			unix_path);
-	ublksrv_json_read_target_str_info(jbuf, NBD_MAX_NAME, "export_name",
-			exp_name);
-	ublksrv_json_read_target_ulong_info(jbuf, "send_zc", &send_zc);
+	ublk_json_read_target_str_info(cdev, "host", host_name);
+	ublk_json_read_target_str_info(cdev, "unix", unix_path);
+	ublk_json_read_target_str_info(cdev, "export_name", exp_name);
+	ublk_json_read_target_ulong_info(cdev, "send_zc", &send_zc);
 
 	NBD_HS_DBG("%s: host %s unix %s exp_name %s send_zc: %lu\n", __func__,
 			host_name, unix_path, exp_name, send_zc);
@@ -891,6 +880,15 @@ static void nbd_parse_flags(struct ublk_params *p, uint16_t flags, uint32_t bs)
         }
 }
 
+static int nbd_recover_tgt(struct ublksrv_dev *dev, int type)
+{
+	uint16_t flags = 0;
+
+	dev->tgt.tgt_data = calloc(sizeof(struct nbd_tgt_data), 1);
+
+	return nbd_setup_tgt(dev, type, true, &flags);
+}
+
 static int nbd_init_tgt(struct ublksrv_dev *dev, int type, int argc,
 		char *argv[])
 {
@@ -904,14 +902,11 @@ static int nbd_init_tgt(struct ublksrv_dev *dev, int type, int argc,
 		{ "read_only",  0,  &read_only, 1},
 		{ NULL }
 	};
+	const struct ublksrv_ctrl_dev *cdev = ublksrv_get_ctrl_dev(dev);
 	struct ublksrv_tgt_info *tgt = &dev->tgt;
 	const struct ublksrv_ctrl_dev_info *info =
 		ublksrv_ctrl_get_dev_info(ublksrv_get_ctrl_dev(dev));
-	int jbuf_size;
-	char *jbuf = ublksrv_tgt_return_json_buf(dev, &jbuf_size);
-	struct ublksrv_tgt_base_json tgt_json = {
-		.type = type,
-	};
+	struct ublksrv_tgt_base_json tgt_json = { 0 };
 	int opt;
 	int option_index = 0;
 	unsigned char bs_shift = 9;
@@ -922,13 +917,13 @@ static int nbd_init_tgt(struct ublksrv_dev *dev, int type, int argc,
 	int ret;
 	unsigned int attrs = UBLK_ATTR_VOLATILE_CACHE;
 
+	if (ublksrv_is_recovering(cdev))
+		return nbd_recover_tgt(dev, 0);
+
 	if (read_only)
 		attrs |= UBLK_ATTR_READ_ONLY;
 
 	strcpy(tgt_json.name, "nbd");
-
-	if (type != UBLKSRV_TGT_TYPE_NBD)
-		return -1;
 
 	while ((opt = getopt_long(argc, argv, "-:f:",
 				  nbd_longopts, &option_index)) != -1) {
@@ -950,20 +945,20 @@ static int nbd_init_tgt(struct ublksrv_dev *dev, int type, int argc,
 		return -EINVAL;
 #endif
 
-	ublk_json_write_dev_info(dev, &jbuf, &jbuf_size);
-	ublk_json_write_tgt_str(dev, &jbuf, &jbuf_size, "host", host_name);
-	ublk_json_write_tgt_str(dev, &jbuf, &jbuf_size, "unix", unix_path);
-	ublk_json_write_tgt_str(dev, &jbuf, &jbuf_size, "export_name", exp_name);
-	ublk_json_write_tgt_long(dev, &jbuf, &jbuf_size, "send_zc", send_zc);
+	ublk_json_write_dev_info(cdev);
+	ublk_json_write_tgt_str(cdev, "host", host_name);
+	ublk_json_write_tgt_str(cdev, "unix", unix_path);
+	ublk_json_write_tgt_str(cdev, "export_name", exp_name);
+	ublk_json_write_tgt_long(cdev, "send_zc", send_zc);
 
 	tgt->tgt_data = calloc(sizeof(struct nbd_tgt_data), 1);
 
-	ret = nbd_setup_tgt(dev, type, false, jbuf, &flags);
+	ret = nbd_setup_tgt(dev, type, false, &flags);
 	if (ret)
 		return ret;
 
 	tgt_json.dev_size = tgt->dev_size;
-	ublk_json_write_target_base(dev, &jbuf, &jbuf_size, &tgt_json);
+	ublk_json_write_target_base(cdev, &tgt_json);
 
 	struct ublk_params p = {
 		.types = UBLK_PARAM_TYPE_BASIC,
@@ -979,40 +974,33 @@ static int nbd_init_tgt(struct ublksrv_dev *dev, int type, int argc,
 	};
 
 	nbd_parse_flags(&p, flags, 1U << bs_shift);
-	ublk_json_write_params(dev, &jbuf, &jbuf_size, &p);
+	ublk_json_write_params(cdev, &p);
 
 	return 0;
 }
 
-static int nbd_recovery_tgt(struct ublksrv_dev *dev, int type)
+static void nbd_cmd_usage()
 {
-	const struct ublksrv_ctrl_dev *cdev = ublksrv_get_ctrl_dev(dev);
-	const char *jbuf = ublksrv_ctrl_get_recovery_jbuf(cdev);
-	uint16_t flags = 0;
+	const char *name = "nbd";
 
-	dev->tgt.tgt_data = calloc(sizeof(struct nbd_tgt_data), 1);
-
-	return nbd_setup_tgt(dev, type, true, jbuf, &flags);
+	printf("ublk.%s add -t %s\n", name, name);
+	ublksrv_print_std_opts();
+	printf("\t--host=$HOST [--port=$PORT] | --unix=$UNIX_PATH\n");
 }
 
-struct ublksrv_tgt_type  nbd_tgt_type = {
+static const struct ublksrv_tgt_type  nbd_tgt_type = {
 	.handle_io_async = nbd_handle_io_async,
 	.tgt_io_done = nbd_tgt_io_done,
 	.handle_io_background = nbd_handle_io_bg,
-	.usage_for_add	=  nbd_usage_for_add,
+	.usage_for_add = nbd_cmd_usage,
 	.init_tgt = nbd_init_tgt,
 	.deinit_tgt = nbd_deinit_tgt,
-	.type	= UBLKSRV_TGT_TYPE_NBD,
 	.name	=  "nbd",
-	.recovery_tgt = nbd_recovery_tgt,
 	.init_queue = nbd_init_queue,
 	.deinit_queue = nbd_deinit_queue,
 };
 
-static void tgt_nbd_init() __attribute__((constructor));
-
-static void tgt_nbd_init(void)
+int main(int argc, char *argv[])
 {
-	ublksrv_register_tgt_type(&nbd_tgt_type);
+	return ublksrv_tgt_cmd_main(&nbd_tgt_type, argc, argv);
 }
-

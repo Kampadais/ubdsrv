@@ -109,7 +109,7 @@ static int __ublksrv_ctrl_cmd(struct ublksrv_ctrl_dev *dev,
 	struct io_uring_cqe *cqe;
 	int ret = -EINVAL;
 
-	sqe = io_uring_get_sqe(&dev->ring);
+	sqe = ublksrv_alloc_sqe(&dev->ring);
 	if (!sqe) {
 		fprintf(stderr, "can't get sqe ret %d\n", ret);
 		return ret;
@@ -117,15 +117,15 @@ static int __ublksrv_ctrl_cmd(struct ublksrv_ctrl_dev *dev,
 
 	ublksrv_ctrl_init_cmd(dev, sqe, data);
 
-	ret = io_uring_submit(&dev->ring);
+	do {
+		ret = io_uring_submit_and_wait(&dev->ring, 1);
+	} while (ret == -EINTR);
 	if (ret < 0) {
-		fprintf(stderr, "uring submit ret %d\n", ret);
+		fprintf(stderr, "uring submit_and_wait ret %d\n", ret);
 		return ret;
 	}
 
-	do {
-		ret = io_uring_wait_cqe(&dev->ring, &cqe);
-	} while (ret == -EINTR);
+	ret = io_uring_peek_cqe(&dev->ring, &cqe);
 	if (ret < 0) {
 		fprintf(stderr, "wait cqe: %s\n", strerror(-ret));
 		return ret;
@@ -137,15 +137,29 @@ static int __ublksrv_ctrl_cmd(struct ublksrv_ctrl_dev *dev,
 	return cqe->res;
 }
 
+static void ublksrv_ctrl_data_init(struct ublksrv_ctrl_dev *cdev,
+		bool recover)
+{
+	ublksrv_tgt_jbuf_init(cdev, &cdev->data->jbuf, recover);
+	cdev->data->recover = recover;
+}
+
+static void ublksrv_ctrl_data_exit(struct ublksrv_ctrl_dev *cdev)
+{
+	ublksrv_tgt_jbuf_exit(&cdev->data->jbuf);
+}
+
 void ublksrv_ctrl_deinit(struct ublksrv_ctrl_dev *dev)
 {
 	close(dev->ring.ring_fd);
 	close(dev->ctrl_fd);
 	free(dev->queues_cpuset);
+	ublksrv_ctrl_data_exit(dev);
+	free(dev->data);
 	free(dev);
 }
 
-struct ublksrv_ctrl_dev *ublksrv_ctrl_init(struct ublksrv_dev_data *data)
+struct ublksrv_ctrl_dev *__ublksrv_ctrl_init(struct ublksrv_dev_data *data, bool recover)
 {
 	struct io_uring_params p;
 	struct ublksrv_ctrl_dev *dev = (struct ublksrv_ctrl_dev *)calloc(1,
@@ -156,7 +170,8 @@ struct ublksrv_ctrl_dev *ublksrv_ctrl_init(struct ublksrv_dev_data *data)
 	dev->ctrl_fd = open(CTRL_DEV, O_RDWR);
 	if (dev->ctrl_fd < 0) {
 		fprintf(stderr, "control dev %s can't be opened: %m\n", CTRL_DEV);
-		exit(dev->ctrl_fd);
+		free(dev);
+		return NULL;
 	}
 
 	/* -1 means we ask ublk driver to allocate one free to us */
@@ -182,7 +197,25 @@ struct ublksrv_ctrl_dev *ublksrv_ctrl_init(struct ublksrv_dev_data *data)
 		return NULL;
 	}
 
+	dev->data = calloc(1, sizeof(struct ublksrv_ctrl_data));
+	if (dev->data == NULL) {
+		fprintf(stderr, "failed to allocate dev data\n");
+		free(dev);
+		return NULL;
+	}
+	ublksrv_ctrl_data_init(dev, recover);
+
 	return dev;
+}
+
+struct ublksrv_ctrl_dev *ublksrv_ctrl_init(struct ublksrv_dev_data *data)
+{
+	return __ublksrv_ctrl_init(data, false);
+}
+
+struct ublksrv_ctrl_dev *ublksrv_ctrl_recover_init(struct ublksrv_dev_data *data)
+{
+	return __ublksrv_ctrl_init(data, true);
 }
 
 /* queues_cpuset is only used for setting up queue pthread daemon */
@@ -464,41 +497,51 @@ void ublksrv_ctrl_dump(struct ublksrv_ctrl_dev *dev, const char *jbuf)
 		fprintf(stderr, "failed to get params %m\n");
 		return;
 	}
-	//print device info in json format
-	printf("{\"dev_id\" : %d , \"nr_hw_queues\" : %d , \"queue_depth\" : %d , \"block_size\" : %d , \"dev_capacity\" : %lld , \"max_rq_size\" : %d , \"daemon_pid\" : %d }",
+
+	printf("dev id %d: nr_hw_queues %d queue_depth %d block size %d dev_capacity %lld\n",
 			info->dev_id,
-			info->nr_hw_queues, info->queue_depth,
-			1 << p.basic.logical_bs_shift, p.basic.dev_sectors,
-			info->max_io_buf_bytes,
-			info->ublksrv_pid);
+                        info->nr_hw_queues, info->queue_depth,
+                        1 << p.basic.logical_bs_shift, p.basic.dev_sectors);
+	printf("\tmax rq size %d daemon pid %d state %s\n",
+                        info->max_io_buf_bytes,
+			info->ublksrv_pid,
+			ublksrv_dev_state_desc(dev));
+        printf("\tflags 0x%llx [%s%s%s%s%s%s%s%s%s%s ]\n",
+                        info->flags,
+                        info->flags & UBLK_F_SUPPORT_ZERO_COPY ? " SUPPORT_ZERO_COPY" : "",
+                        info->flags & UBLK_F_URING_CMD_COMP_IN_TASK ? " URING_CMD_COMP_IN_TASK" : "",
+                        info->flags & UBLK_F_NEED_GET_DATA ? " NEED_GET_DATA" : "",
+                        info->flags & UBLK_F_UNPRIVILEGED_DEV ? " UNPRIVILEGED_DEV" : "",
+                        info->flags & UBLK_F_USER_RECOVERY ? " RECOVERY" : "",
+                        info->flags & UBLK_F_USER_RECOVERY_REISSUE ? " RECOVERY_REISSUE" : "",
+                        info->flags & UBLK_F_CMD_IOCTL_ENCODE ? " CMD_IOCTL_ENCODE" : "",
+                        info->flags & UBLK_F_USER_COPY ? " USER_COPY" : "",
+                        info->flags & UBLK_F_ZONED ? " ZONED" : "",
+                        info->flags & UBLK_F_USER_RECOVERY_FAIL_IO ? " RECOVERY_FAIL_IO" : "");
+	printf("\tublkc: %u:%d ublkb: %u:%u owner: %u:%u\n",
+			p.devt.char_major, p.devt.char_minor,
+			p.devt.disk_major, p.devt.disk_minor,
+			info->owner_uid, info->owner_gid);
 
-	//	printf("dev id %d: nr_hw_queues %d queue_depth %d block size %d dev_capacity %lld\n",
-	//			info->dev_id,
-	//                        info->nr_hw_queues, info->queue_depth,
-	//                        1 << p.basic.logical_bs_shift, p.basic.dev_sectors);
-	//	printf("\tmax rq size %d daemon pid %d flags 0x%llx state %s\n",
-	//                        info->max_io_buf_bytes,
-	//			info->ublksrv_pid, info->flags,
-	//			ublksrv_dev_state_desc(dev));
-	//	printf("\tublkc: %u:%d ublkb: %u:%u owner: %u:%u\n",
-	//			p.devt.char_major, p.devt.char_minor,
-	//			p.devt.disk_major, p.devt.disk_minor,
-	//			info->owner_uid, info->owner_gid);
+	if (jbuf) {
+		char buf[512];
 
-	//	if (jbuf) {
-	//		char buf[512];
-	//
-	//		for(i = 0; i < info->nr_hw_queues; i++) {
-	//			unsigned tid;
-	//
-	//			ublksrv_json_read_queue_info(jbuf, i, &tid, buf, 512);
-	//			printf("\tqueue %u: tid %d affinity(%s)\n",
-	//					i, tid, buf);
-	//		}
-	//
-	//		ublksrv_json_read_target_info(jbuf, buf, 512);
-	//		printf("\ttarget %s\n", buf);
-	//	}
+		for(i = 0; i < info->nr_hw_queues; i++) {
+			unsigned tid;
+
+			ublksrv_json_read_queue_info(jbuf, i, &tid, buf, 512);
+			printf("\tqueue %u: tid %d affinity(%s)\n",
+					i, tid, buf);
+		}
+
+		ublksrv_json_read_target_info(jbuf, buf, 512);
+		printf("\ttarget %s\n", buf);
+	}
+}
+
+void ublk_ctrl_dump(struct ublksrv_ctrl_dev *dev)
+{
+	return ublksrv_ctrl_dump(dev, dev->data->jbuf.jbuf);
 }
 
 int ublksrv_ctrl_set_params(struct ublksrv_ctrl_dev *dev,
@@ -625,4 +668,14 @@ void ublksrv_ctrl_prep_recovery(struct ublksrv_ctrl_dev *dev,
 const char *ublksrv_ctrl_get_recovery_jbuf(const struct ublksrv_ctrl_dev *dev)
 {
 	return dev->recovery_jbuf;
+}
+
+void *ublksrv_ctrl_get_priv_data(const struct ublksrv_ctrl_dev *dev)
+{
+	return dev->private_data;
+}
+
+void ublksrv_ctrl_set_priv_data(struct ublksrv_ctrl_dev *dev, void *data)
+{
+	dev->private_data = data;
 }
